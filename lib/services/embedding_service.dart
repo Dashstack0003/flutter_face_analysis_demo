@@ -96,9 +96,12 @@ class EmbeddingService {
       for (int x = 0; x < inputSize; x++) {
         final pixel = resized.getPixel(x, y);
         // MobileFaceNet normalization: (x - 127.5) / 128
-        input[idx++] = (pixel.r - 127.5) / 128.0;
-        input[idx++] = (pixel.g - 127.5) / 128.0;
-        input[idx++] = (pixel.b - 127.5) / 128.0;
+        input[idx++] = pixel.r / 255.0;
+        input[idx++] = pixel.g / 255.0;
+        input[idx++] = pixel.b / 255.0;
+        // input[idx++] = (pixel.r - 127.5) / 128.0;
+        // input[idx++] = (pixel.g - 127.5) / 128.0;
+        // input[idx++] = (pixel.b - 127.5) / 128.0;
       }
     }
 
