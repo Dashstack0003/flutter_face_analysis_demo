@@ -42,11 +42,11 @@ class ClusteringService {
   static const int _noiseLabel = -1;
 
   ClusteringService({
-    this.eps = 0.95, // tuned for 512D FaceNet embeddings
+    this.eps = 0.65, // tuned for 512D FaceNet embeddings
     this.minSamples = 1,
-    this.mergeThreshold = 0.88, // merge clusters whose centroids are close
+    this.mergeThreshold = 0.65, // merge clusters whose centroids are close
     this.assignmentThreshold =
-        1.0, // lenient: link new photos of existing people
+        0.9, // lenient: link new photos of existing people
   });
 
   // ─────────────────────────────────────────────────────────────
