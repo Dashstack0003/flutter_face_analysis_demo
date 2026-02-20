@@ -173,12 +173,12 @@ class FaceDetectionService {
       for (int x = 0; x < inputSize; x++) {
         final pixel = resized.getPixel(x, y);
         // Normalize from [0, 255] to [-1.0, 1.0]
-        // input[pixelIndex++] = pixel.r / 255.0;
-        // input[pixelIndex++] = pixel.g / 255.0;
-        // input[pixelIndex++] = pixel.b / 255.0;
-        input[pixelIndex++] = (pixel.r - 127.5) / 127.5;
-        input[pixelIndex++] = (pixel.g - 127.5) / 127.5;
-        input[pixelIndex++] = (pixel.b - 127.5) / 127.5;
+        input[pixelIndex++] = pixel.r / 255.0;
+        input[pixelIndex++] = pixel.g / 255.0;
+        input[pixelIndex++] = pixel.b / 255.0;
+        // input[pixelIndex++] = (pixel.r - 127.5) / 127.5;
+        // input[pixelIndex++] = (pixel.g - 127.5) / 127.5;
+        // input[pixelIndex++] = (pixel.b - 127.5) / 127.5;
       }
     }
 
