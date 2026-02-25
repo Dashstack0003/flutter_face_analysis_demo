@@ -16,30 +16,37 @@ class ClusteringResult {
   });
 
   int get clusterCount => clusters.length;
+
   bool get hasClusters => clusters.isNotEmpty;
 }
 
 /// Groups faces into clusters of the same person using DBSCAN + post-merge.
 class ClusteringService {
   /// Distance threshold for DBSCAN neighbor detection.
-  /// LOWERED from 0.6 → 0.8 for more lenient grouping (same person across
-  /// different lighting/angles/expressions should cluster together).
   final double eps;
 
   /// Minimum faces to form a core point.
   /// Set to 1 so even a single face gets its own cluster.
   final int minSamples;
 
-  /// Merge clusters whose centroids are within this distance.
-  /// Prevents duplicate people from being split across multiple clusters.
+  /// Post-DBSCAN merge threshold (conservative).
+  /// Only merges clusters whose centroids are VERY close.
+  /// Kept low to avoid false merges of different people.
   final double mergeThreshold;
+
+  /// Threshold used by [assignToNearestCluster] for incremental photo assignment.
+  /// Higher than [mergeThreshold] so new photos of existing people get correctly
+  /// assigned even when the embedding drifts across sessions.
+  final double assignmentThreshold;
 
   static const int _noiseLabel = -1;
 
   ClusteringService({
-    this.eps = 0.8,              // ← INCREASED for looser matching
+    this.eps = 0.65, // tuned for 512D FaceNet embeddings
     this.minSamples = 1,
-    this.mergeThreshold = 0.7,   // ← NEW: merge similar clusters
+    this.mergeThreshold = 0.85, // merge clusters whose centroids are close
+    this.assignmentThreshold =
+        0.9, // lenient: link new photos of existing people
   });
 
   // ─────────────────────────────────────────────────────────────
@@ -92,10 +99,24 @@ class ClusteringService {
 
   List<List<double>> _buildDistanceMatrix(List<FaceModel> faces) {
     final n = faces.length;
-    final distances = List.generate(n, (_) => List<double>.filled(n, 0.0));
+    // Use infinity as the "impossible" sentinel so same-image pairs are never
+    // considered neighbours, regardless of how close their embeddings are.
+    final distances = List.generate(
+      n,
+      (_) => List<double>.filled(n, double.infinity),
+    );
 
     for (int i = 0; i < n; i++) {
+      distances[i][i] = 0.0; // self-distance is always 0
+
       for (int j = i + 1; j < n; j++) {
+        // Same-image constraint: two faces from the same photo are ALWAYS
+        // different people. Never let DBSCAN link them as neighbours.
+        if (faces[i].imageId == faces[j].imageId) {
+          // Leave both distances[i][j] and distances[j][i] as infinity.
+          continue;
+        }
+
         final dist = EmbeddingService.euclideanDistance(
           faces[i].embedding!,
           faces[j].embedding!,
@@ -133,13 +154,13 @@ class ClusteringService {
   }
 
   void _expandCluster(
-      int pointIdx,
-      List<int> neighbors,
-      int clusterId,
-      List<int> labels,
-      int n,
-      List<List<double>> distances,
-      ) {
+    int pointIdx,
+    List<int> neighbors,
+    int clusterId,
+    List<int> labels,
+    int n,
+    List<List<double>> distances,
+  ) {
     final queue = List<int>.from(neighbors);
 
     int qi = 0;
@@ -165,7 +186,8 @@ class ClusteringService {
   List<int> _regionQuery(int pointIdx, int n, List<List<double>> distances) {
     final neighbors = <int>[];
     for (int j = 0; j < n; j++) {
-      if (j != pointIdx && distances[pointIdx][j] <= eps) {
+      // REMOVE "j != pointIdx" so the point counts as its own neighbor
+      if (distances[pointIdx][j] <= eps) {
         neighbors.add(j);
       }
     }
@@ -194,23 +216,25 @@ class ClusteringService {
       final imageIds = clusterFaces.map((f) => f.imageId).toSet().toList();
 
       final representative = clusterFaces.reduce(
-            (best, face) =>
-        face.detectionConfidence > best.detectionConfidence ? face : best,
+        (best, face) =>
+            face.detectionConfidence > best.detectionConfidence ? face : best,
       );
 
       final centroid = _computeCentroid(
         clusterFaces.map((f) => f.embedding!).toList(),
       );
 
-      clusters.add(ClusterModel(
-        clusterId: clusterId,
-        faceIds: clusterFaces.map((f) => f.id).toList(),
-        imageIds: imageIds,
-        representativeFaceId: representative.id,
-        centroidEmbedding: centroid,
-        createdAt: now,
-        updatedAt: now,
-      ));
+      clusters.add(
+        ClusterModel(
+          clusterId: clusterId,
+          faceIds: clusterFaces.map((f) => f.id).toList(),
+          imageIds: imageIds,
+          representativeFaceId: representative.id,
+          centroidEmbedding: centroid,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
     }
 
     clusters.sort((a, b) => b.faceCount.compareTo(a.faceCount));
@@ -223,109 +247,108 @@ class ClusteringService {
   // ─────────────────────────────────────────────────────────────
 
   /// Merges clusters whose centroids are within [mergeThreshold] distance.
-  /// This fixes duplicate people being split across multiple clusters due
-  /// to DBSCAN's strict eps requirements.
+  ///
+  /// Uses ITERATIVE greedy merging (NOT union-find):
+  ///   1. Find the closest pair of clusters.
+  ///   2. If their distance ≤ mergeThreshold, merge them and RECOMPUTE centroid.
+  ///   3. Repeat until no pair is below threshold.
+  ///
+  /// This prevents the transitivity / bridge problem: with union-find, if
+  /// A↔B < threshold and B↔C < threshold, all three merge even when A↔C is
+  /// large (A and C are different people).  After merging A+B the centroid
+  /// shifts, so the new AB↔C distance is checked fresh — no more false chains.
   Map<String, dynamic> _mergeSimilarClusters(
-      List<ClusterModel> clusters,
-      List<FaceModel> faces,
-      ) {
+    List<ClusterModel> clusters,
+    List<FaceModel> faces,
+  ) {
     if (clusters.length <= 1) {
       return {'clusters': clusters, 'faces': faces};
     }
 
-    // Build centroid distance matrix
-    final n = clusters.length;
-    final centroidDistances = List.generate(n, (_) => List<double>.filled(n, 0.0));
+    // Working copy — cluster IDs stay as original DBSCAN IDs throughout.
+    var working = List<ClusterModel>.from(clusters);
 
-    for (int i = 0; i < n; i++) {
-      for (int j = i + 1; j < n; j++) {
-        if (!clusters[i].hasCentroid || !clusters[j].hasCentroid) continue;
+    // Maps each surviving cluster ID → all original cluster IDs absorbed into it.
+    final originalsFor = <int, List<int>>{
+      for (final c in clusters) c.clusterId: [c.clusterId],
+    };
 
-        final dist = EmbeddingService.euclideanDistance(
-          clusters[i].centroidEmbedding!,
-          clusters[j].centroidEmbedding!,
-        );
-        centroidDistances[i][j] = dist;
-        centroidDistances[j][i] = dist;
-      }
-    }
+    // Greedy loop: always merge the single closest pair below threshold.
+    while (true) {
+      double bestDist = double.infinity;
+      int bestI = -1, bestJ = -1;
 
-    // Find clusters to merge using union-find
-    final parent = List<int>.generate(n, (i) => i);
-
-    int find(int x) {
-      if (parent[x] != x) parent[x] = find(parent[x]);
-      return parent[x];
-    }
-
-    void union(int x, int y) {
-      final px = find(x);
-      final py = find(y);
-      if (px != py) parent[px] = py;
-    }
-
-    // Merge clusters within threshold
-    for (int i = 0; i < n; i++) {
-      for (int j = i + 1; j < n; j++) {
-        if (centroidDistances[i][j] <= mergeThreshold) {
-          union(i, j);
+      for (int i = 0; i < working.length; i++) {
+        for (int j = i + 1; j < working.length; j++) {
+          if (!working[i].hasCentroid || !working[j].hasCentroid) continue;
+          final dist = EmbeddingService.euclideanDistance(
+            working[i].centroidEmbedding!,
+            working[j].centroidEmbedding!,
+          );
+          print(
+            '[mergeSimilarClusters] dist ${working[i].displayName}(${working[i].clusterId})'
+            ' ↔ ${working[j].displayName}(${working[j].clusterId}): $dist',
+          );
+          if (dist < bestDist) {
+            bestDist = dist;
+            bestI = i;
+            bestJ = j;
+          }
         }
       }
+
+      if (bestI == -1 || bestDist > mergeThreshold) break;
+
+      // Merge working[bestJ] INTO working[bestI].
+      final a = working[bestI];
+      final b = working[bestJ];
+
+      final allFaceIds = [...a.faceIds, ...b.faceIds];
+      final allImageIds = {...a.imageIds, ...b.imageIds}.toList();
+      final mergedFaces = faces
+          .where((f) => allFaceIds.contains(f.id))
+          .toList();
+
+      final representative = mergedFaces.reduce(
+        (best, f) =>
+            f.detectionConfidence > best.detectionConfidence ? f : best,
+      );
+      final centroid = _computeCentroid(
+        mergedFaces.map((f) => f.embedding!).toList(),
+      );
+
+      working[bestI] = ClusterModel(
+        clusterId: a.clusterId,
+        // keep survivor's original ID
+        faceIds: allFaceIds,
+        imageIds: allImageIds,
+        representativeFaceId: representative.id,
+        centroidEmbedding: centroid,
+        // ← fresh centroid prevents bridging
+        createdAt: a.createdAt,
+        updatedAt: DateTime.now(),
+      );
+
+      // Track all originals that now belong to the survivor.
+      originalsFor[a.clusterId]!.addAll(originalsFor[b.clusterId]!);
+      originalsFor.remove(b.clusterId);
+      working.removeAt(bestJ);
     }
 
-    // Group clusters by merge group
-    final mergeGroups = <int, List<int>>{};
-    for (int i = 0; i < n; i++) {
-      mergeGroups.putIfAbsent(find(i), () => []).add(i);
-    }
-
-    // Build merged clusters
+    // Renumber final clusters 0, 1, 2, … and build oldToNew map.
     final mergedClusters = <ClusterModel>[];
-    final oldToNew = <int, int>{};
-    int newClusterId = 0;
+    final oldToNew = <int, int>{}; // original DBSCAN ID → new sequential ID
+    int newId = 0;
 
-    for (final group in mergeGroups.values) {
-      if (group.length == 1) {
-        // No merge needed
-        final old = clusters[group.first];
-        oldToNew[old.clusterId] = newClusterId;
-        mergedClusters.add(old.copyWith(clusterId: newClusterId));
-      } else {
-        // Merge multiple clusters
-        final toMerge = group.map((i) => clusters[i]).toList();
-        final allFaceIds = toMerge.expand((c) => c.faceIds).toList();
-        final allImageIds = toMerge.expand((c) => c.imageIds).toSet().toList();
-
-        // Pick representative with highest confidence
-        final allFaces = faces.where((f) => allFaceIds.contains(f.id)).toList();
-        final representative = allFaces.reduce(
-              (best, face) =>
-          face.detectionConfidence > best.detectionConfidence ? face : best,
-        );
-
-        // Recompute merged centroid
-        final centroid = _computeCentroid(
-          allFaces.map((f) => f.embedding!).toList(),
-        );
-
-        for (final old in toMerge) {
-          oldToNew[old.clusterId] = newClusterId;
-        }
-
-        mergedClusters.add(ClusterModel(
-          clusterId: newClusterId,
-          faceIds: allFaceIds,
-          imageIds: allImageIds,
-          representativeFaceId: representative.id,
-          centroidEmbedding: centroid,
-          createdAt: toMerge.first.createdAt,
-          updatedAt: DateTime.now(),
-        ));
+    for (final c in working) {
+      for (final origId in originalsFor[c.clusterId]!) {
+        oldToNew[origId] = newId;
       }
-      newClusterId++;
+      mergedClusters.add(c.copyWith(clusterId: newId));
+      newId++;
     }
 
-    // Reassign faces to merged cluster IDs
+    // Reassign faces.
     final updatedFaces = faces.map((f) {
       if (f.isClustered && oldToNew.containsKey(f.clusterId)) {
         return f.withCluster(oldToNew[f.clusterId]!);
@@ -335,6 +358,9 @@ class ClusteringService {
 
     mergedClusters.sort((a, b) => b.faceCount.compareTo(a.faceCount));
 
+    print(
+      '[mergeSimilarClusters] Result: ${mergedClusters.length} clusters after merge',
+    );
     return {'clusters': mergedClusters, 'faces': updatedFaces};
   }
 
@@ -390,6 +416,6 @@ class ClusteringService {
       }
     }
 
-    return bestDistance <= eps ? bestClusterId : _noiseLabel;
+    return bestDistance <= assignmentThreshold ? bestClusterId : _noiseLabel;
   }
 }
