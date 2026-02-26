@@ -451,6 +451,10 @@ class FaceRepository {
       final allFaces = await HiveHelper.getAllFaces();
       final unassigned = allFaces.where((f) => !f.isClustered).length;
 
+      _clusteringService.debugDistanceStats(
+        allFaces.map((f) => f.embedding!).toList(),
+      );
+
       return FaceRepositoryResult.success(
         FaceStats(
           totalFaces: totalFaces,

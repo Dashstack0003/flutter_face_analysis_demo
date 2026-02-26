@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:math';
 import '../models/face_model.dart';
 import '../models/cluster_model.dart';
 import 'embedding_service.dart';
@@ -44,9 +45,9 @@ class ClusteringService {
   ClusteringService({
     this.eps = 0.7, // tuned for 512D FaceNet embeddings
     this.minSamples = 1,
-    this.mergeThreshold = 0.85 , // merge clusters whose centroids are close
+    this.mergeThreshold = 0.75 , // merge clusters whose centroids are close
     this.assignmentThreshold =
-        0.95, // lenient: link new photos of existing people
+        0.9, // lenient: link new photos of existing people
   });
 
   // ─────────────────────────────────────────────────────────────
@@ -418,4 +419,48 @@ class ClusteringService {
 
     return bestDistance <= assignmentThreshold ? bestClusterId : _noiseLabel;
   }
+
+  void debugDistanceStats(List<List<double>> embeddings) {
+    final distances = <double>[];
+
+    for (int i = 0; i < embeddings.length; i++) {
+      for (int j = i + 1; j < embeddings.length; j++) {
+        final d = EmbeddingService.euclideanDistance(
+          embeddings[i],
+          embeddings[j],
+        );
+        distances.add(d);
+      }
+    }
+
+    if (distances.isEmpty) return;
+
+    distances.sort();
+
+    print("MIN: ${distances.first}");
+    print("P10: ${distances[(distances.length * 0.1).floor()]}");
+    print("P25: ${distances[(distances.length * 0.25).floor()]}");
+    print("P50: ${distances[(distances.length * 0.5).floor()]}");
+    print("P75: ${distances[(distances.length * 0.75).floor()]}");
+    print("P90: ${distances[(distances.length * 0.9).floor()]}");
+    print("MAX: ${distances.last}");
+  }
+
+  double computeAdaptiveThreshold(List<double> distances) {
+    distances.sort();
+    final lower = distances[(distances.length * 0.25).floor()];
+    final upper = distances[(distances.length * 0.75).floor()];
+    return (lower + upper) / 2;
+  }
+
+  // double _euclideanDistance(List<double> a, List<double> b) {
+  //   double sum = 0.0;
+  //
+  //   for (int i = 0; i < a.length; i++) {
+  //     final diff = a[i] - b[i];
+  //     sum += diff * diff;
+  //   }
+  //
+  //   return sqrt(sum);
+  // }
 }
