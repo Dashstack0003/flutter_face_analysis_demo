@@ -159,6 +159,12 @@ class TFLiteService {
       final t = faceNetOutputs[i];
       print('[TFLiteService] MobileFaceNet output[$i]: shape=${t.shape}, type=${t.type}');
     }
+
+    final inputShape = blazeFaceInterpreter.getInputTensor(0).shape;
+    final outputShape = blazeFaceInterpreter.getOutputTensor(0).shape;
+
+    print("Input Shape: $inputShape");
+    print("Output Shape: $outputShape");
   }
 
   // ─────────────────────────────────────────

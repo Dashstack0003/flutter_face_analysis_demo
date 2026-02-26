@@ -78,27 +78,25 @@ class EmbeddingService {
   /// MobileFaceNet expects:
   ///   - Input shape: [1, 160, 160, 3]
   ///   - Pixel values: (value - 127.5) / 128.0
-  Float32List _preprocessFace(img.Image faceImage) {
-    const inputSize = TFLiteService.mobileFaceNetInputSize;
-
-    // Ensure exact 112×112 size
+  Float32List _preprocessFace(img.Image image) {
     final resized = img.copyResize(
-      faceImage,
-      width: inputSize,
-      height: inputSize,
+      image,
+      width: 160,
+      height: 160,
       interpolation: img.Interpolation.linear,
     );
 
-    final input = Float32List(1 * inputSize * inputSize * 3);
-    int idx = 0;
+    final input = Float32List(1 * 160 * 160 * 3);
+    int index = 0;
 
-    for (int y = 0; y < inputSize; y++) {
-      for (int x = 0; x < inputSize; x++) {
+    for (int y = 0; y < 160; y++) {
+      for (int x = 0; x < 160; x++) {
         final pixel = resized.getPixel(x, y);
-        // MobileFaceNet normalization: (x - 127.5) / 128
-        input[idx++] = pixel.r / 255.0;
-        input[idx++] = pixel.g / 255.0;
-        input[idx++] = pixel.b / 255.0;
+
+        // 🔥 CORRECT normalization for MobileFaceNet
+        input[index++] = (pixel.r - 127.5) / 128.0;
+        input[index++] = (pixel.g - 127.5) / 128.0;
+        input[index++] = (pixel.b - 127.5) / 128.0;
       }
     }
 
@@ -151,19 +149,15 @@ class EmbeddingService {
   ///
   /// Formula: normalized[i] = raw[i] / sqrt(sum(raw[j]^2))
   List<double> _l2Normalize(List<double> embedding) {
-    double sumSquares = 0.0;
+    double sum = 0.0;
+
     for (final v in embedding) {
-      sumSquares += v * v;
+      sum += v * v;
     }
 
-    final norm = math.sqrt(sumSquares);
+    final norm = sqrt(sum);
 
-    if (norm == 0.0) {
-      // Degenerate case — return zero vector rather than divide by zero
-      return List<double>.filled(embedding.length, 0.0);
-    }
-
-    return embedding.map((v) => v / norm).toList();
+    return embedding.map((e) => e / norm).toList();
   }
 
   // ─────────────────────────────────────────
