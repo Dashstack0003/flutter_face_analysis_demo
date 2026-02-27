@@ -63,29 +63,37 @@ class FaceDetectionService {
     try {
       final file = File(imagePath);
       if (!await file.exists()) {
+        print("[FaceDetection] Image file not found");
         return const DetectionResult(faces: []);
       }
 
       final bytes = await file.readAsBytes();
       final originalImage = img.decodeImage(bytes);
       if (originalImage == null) {
+        print("[FaceDetection] Failed to decode image");
         return const DetectionResult(faces: []);
       }
 
+      print(
+        "[FaceDetection] Image loaded: ${originalImage.width}x${originalImage.height}",
+      );
+
       final input = _preprocessImage(originalImage);
 
-      final n = 2304;
-      final outputBoxes =
-      List.filled(1 * n * 16, 0.0).reshape([1, n, 16]);
-      final outputScores =
-      List.filled(1 * n * 1, 0.0).reshape([1, n, 1]);
+      const int n = 2304;
+      final outputBoxes = List.filled(1 * n * 16, 0.0).reshape([1, n, 16]);
+      final outputScores = List.filled(1 * n * 1, 0.0).reshape([1, n, 1]);
 
       final interpreter = _tfliteService.blazeFaceInterpreter;
 
       interpreter.runForMultipleInputs(
-        [input.reshape([1, 192, 192, 3])],
+        [
+          input.reshape([1, 192, 192, 3]),
+        ],
         {0: outputBoxes, 1: outputScores},
       );
+
+      print("[FaceDetection] BlazeFace inference completed");
 
       final anchors = _generateAnchors();
       final detectedFaces = <DetectedFace>[];
@@ -98,6 +106,8 @@ class FaceDetectionService {
         final score = _sigmoid(outputScores[0][i][0]);
         if (score < confidenceThreshold) continue;
 
+        print("[FaceDetection] Face detected with confidence: $score");
+
         final anchor = anchors[i];
 
         final dx = outputBoxes[0][i][0];
@@ -105,65 +115,118 @@ class FaceDetectionService {
         final dw = outputBoxes[0][i][2];
         final dh = outputBoxes[0][i][3];
 
-        // Proper anchor decoding
+        // Decode bounding box
         final cx = dx / 192 + anchor[0];
         final cy = dy / 192 + anchor[1];
         final w = dw / 192;
         final h = dh / 192;
 
-        final xmin = ((cx - w / 2) * imageWidth);
-        final ymin = ((cy - h / 2) * imageHeight);
-        final width = (w * imageWidth);
-        final height = (h * imageHeight);
+        final xmin = (cx - w / 2) * imageWidth;
+        final ymin = (cy - h / 2) * imageHeight;
+        final width = w * imageWidth;
+        final height = h * imageHeight;
 
         if (width <= 0 || height <= 0) continue;
 
-        final cropX = xmin.clamp(0.0, imageWidth - 1).toInt();
-        final cropY = ymin.clamp(0.0, imageHeight - 1).toInt();
-        final cropW = width.clamp(1.0, imageWidth - cropX).toInt();
-        final cropH = height.clamp(1.0, imageHeight - cropY).toInt();
+        // Decode eye landmarks
+        final leftEyeX = (outputBoxes[0][i][4] / 192 + anchor[0]) * imageWidth;
+        final leftEyeY = (outputBoxes[0][i][5] / 192 + anchor[1]) * imageHeight;
+
+        final rightEyeX = (outputBoxes[0][i][6] / 192 + anchor[0]) * imageWidth;
+        final rightEyeY =
+            (outputBoxes[0][i][7] / 192 + anchor[1]) * imageHeight;
+
+        // Compute alignment angle
+        final dxEye = rightEyeX - leftEyeX;
+        final dyEye = rightEyeY - leftEyeY;
+
+        final angleRad = math.atan2(dyEye, dxEye);
+        final angleDeg = angleRad * 180 / math.pi;
+
+        print("[FaceDetection] Rotation angle: $angleDeg");
+
+        final workingImage = originalImage;
+        // Rotate entire image
+        final rotatedImage = img.copyRotate(
+          workingImage,
+          angle: -safeAngle(angleDeg),
+        );
+
+        // Rotate bounding box center
+        final imageCenter = Offset(imageWidth / 2, imageHeight / 2);
+        final boxCenter = Offset(xmin + width / 2, ymin + height / 2);
+
+        final rotatedCenter = rotatePoint(boxCenter, imageCenter, -angleRad);
+
+        // Add margin
+        const margin = 0.2;
+
+        final expandedW = width * (1 + margin);
+        final expandedH = height * (1 + margin);
+
+        // Recalculate crop center after margin
+        final cropCenterX = rotatedCenter.dx;
+        final cropCenterY = rotatedCenter.dy;
+
+        final cropX = (cropCenterX - expandedW / 2)
+            .clamp(0.0, rotatedImage.width - 1)
+            .toInt();
+
+        final cropY = (cropCenterY - expandedH / 2)
+            .clamp(0.0, rotatedImage.height - 1)
+            .toInt();
+
+        final cropW = expandedW.clamp(1.0, rotatedImage.width - cropX).toInt();
+
+        final cropH = expandedH.clamp(1.0, rotatedImage.height - cropY).toInt();
 
         final cropped = img.copyCrop(
-          originalImage,
+          rotatedImage,
           x: cropX,
           y: cropY,
           width: cropW,
           height: cropH,
         );
 
-        final resized = img.copyResize(
-          cropped,
-          width: 160,
-          height: 160,
-        );
+        // Resize aligned face to FaceNet size
+        final alignedFace = img.copyResize(cropped, width: 160, height: 160);
 
         final faceId = _uuid.v4();
         final filePath = '${cropsDir.path}/$faceId.jpg';
 
-        await File(filePath)
-            .writeAsBytes(img.encodeJpg(resized));
+        await File(filePath).writeAsBytes(img.encodeJpg(alignedFace));
+
+        print("[FaceDetection] Face saved: $filePath");
 
         detectedFaces.add(
           DetectedFace(
             faceId: faceId,
             croppedPath: filePath,
+            confidence: score,
             bboxX: xmin,
             bboxY: ymin,
             bboxWidth: width,
             bboxHeight: height,
-            confidence: score,
             boundingBox: Rect.fromLTWH(xmin, ymin, width, height),
-            leftEye: Offset.zero,
-            rightEye: Offset.zero,
-            croppedFace: resized,
+            leftEye: Offset(leftEyeX, leftEyeY),
+            rightEye: Offset(rightEyeX, rightEyeY),
+            croppedFace: alignedFace,
           ),
         );
       }
 
+      print("[FaceDetection] Total faces detected: ${detectedFaces.length}");
+
       return DetectionResult(faces: detectedFaces);
     } catch (e) {
+      print("[FaceDetection] Error: $e");
       return const DetectionResult(faces: []);
     }
+  }
+
+  double safeAngle(double angle) {
+    if (angle.isNaN || angle.isInfinite) return 0.0;
+    return angle;
   }
 
   // ─────────────────────────────────────────
@@ -186,9 +249,9 @@ class FaceDetectionService {
         final pixel = resized.getPixel(x, y);
 
         // BlazeFace expects [-1, 1]
-        input[index++] = (pixel.r - 127.5) / 128.0;
-        input[index++] = (pixel.g - 127.5) / 128.0;
-        input[index++] = (pixel.b - 127.5) / 128.0;
+        input[index++] = (pixel.r - 127.5) / 127.5;
+        input[index++] = (pixel.g - 127.5) / 127.5;
+        input[index++] = (pixel.b - 127.5) / 127.5;
       }
     }
 
@@ -224,5 +287,18 @@ class FaceDetectionService {
     }
 
     return anchors; // 48 x 48 = 2304 anchors
+  }
+
+  Offset rotatePoint(Offset point, Offset center, double angleRad) {
+    final cosA = math.cos(angleRad);
+    final sinA = math.sin(angleRad);
+
+    final dx = point.dx - center.dx;
+    final dy = point.dy - center.dy;
+
+    final newX = dx * cosA - dy * sinA + center.dx;
+    final newY = dx * sinA + dy * cosA + center.dy;
+
+    return Offset(newX, newY);
   }
 }

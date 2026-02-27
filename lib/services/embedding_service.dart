@@ -94,9 +94,9 @@ class EmbeddingService {
         final pixel = resized.getPixel(x, y);
 
         // 🔥 CORRECT normalization for MobileFaceNet
-        input[index++] = (pixel.r - 127.5) / 128.0;
-        input[index++] = (pixel.g - 127.5) / 128.0;
-        input[index++] = (pixel.b - 127.5) / 128.0;
+        input[index++] = (pixel.r - 127.5) / 127.5;
+        input[index++] = (pixel.g - 127.5) / 127.5;
+        input[index++] = (pixel.b - 127.5) / 127.5;
       }
     }
 
@@ -134,8 +134,8 @@ class EmbeddingService {
 
     // Cast inner elements to double safely
     final List<dynamic> firstBatch = output[0];
-    return _normalize(firstBatch.cast());
-    // return firstBatch.map((e) => (e as num).toDouble()).toList();
+    // return _normalize(firstBatch.cast());
+    return firstBatch.map((e) => (e as num).toDouble()).toList();
   }
 
   // ─────────────────────────────────────────
@@ -156,6 +156,7 @@ class EmbeddingService {
     }
 
     final norm = sqrt(sum);
+    // Euclidean distance ≈ sqrt(2 - 2cosθ)
 
     return embedding.map((e) => e / norm).toList();
   }
