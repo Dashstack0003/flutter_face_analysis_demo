@@ -206,6 +206,11 @@ class EmbeddingService {
 
     double norm = sqrt(sum);
 
-    return embedding.map((e) => e / norm).toList();
+    List<double> embeddingList = [];
+    for (var e in embedding) {
+      embeddingList.add(e / norm);
+    }
+
+    return embeddingList;
   }
 }
